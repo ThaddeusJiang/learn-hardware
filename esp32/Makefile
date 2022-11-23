@@ -1,0 +1,1 @@
+clean:;         rm -rvf .esphome

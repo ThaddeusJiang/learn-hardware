@@ -1,0 +1,231 @@
+esphome:
+  name: matrix-led
+  comment: matrix display by esp32
+  on_boot:
+    priority: -100
+    then:
+      - lambda: |-
+          id(github_stars).publish_state("");
+          auto brightness = id(display_brightness);
+          id(matrix_display).intensity(brightness);
+
+esp32:
+  board: esp-wrover-kit
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  # fast_connect: True
+  output_power: 20.5dB
+
+  # Enable fallback hotspot (captive portal) in case wifi connection fails
+  ap:
+    ssid: "Kang Iot"
+    password: "ezRXSxLBmzpP2s"
+
+# captive_portal:
+
+# setup via https://www.improv-wifi.com/
+# need too much memory
+# esp32_improv:
+#   authorizer: none
+
+# esp32_ble:
+
+spi:
+  clk_pin: GPIO18
+  mosi_pin: GPIO23
+api:
+  password: !secret api_password
+
+ota:
+  password: !secret api_password
+
+logger:
+  level: DEBUG
+  logs:
+    esp32_touch: INFO
+time:
+  - platform: sntp
+    timezone: "Asia/Tokyo"
+    id: sntp_time
+    on_time:
+      # Every 5 minutes
+      - seconds: 0
+        minutes: /5
+        then:
+          - script.execute: github_get
+    on_time_sync:
+      - then:
+          - script.execute: github_get
+globals:
+  - id: display_content
+    type: int
+    restore_value: yes
+    initial_value: "0"
+    # 0: clock
+    # 1: github_stars
+    # 2: pressure
+  - id: display_brightness
+    type: int
+    restore_value: yes
+    initial_value: "10"
+  - id: display_custom_content
+    type: std::string
+    restore_value: no
+    initial_value: ""
+
+font:
+  - file: "pixelmix.ttf"
+    id: digit_font
+    size: 8
+  - file: "pixelmix.ttf"
+    id: digit_font_6
+    size: 6
+
+image:
+  - file: "twitter_icon.png"
+    id: twitter_icon
+    resize: 11x11
+    # type: BINARY
+
+display:
+  - platform: max7219digit
+    cs_pin: GPIO05
+    num_chips: 4
+    id: matrix_display
+    update_interval: 1s
+    intensity: 10
+    lambda: |-
+      auto custom_content = id(display_custom_content);
+      if (custom_content != "") {
+        it.print(0, 0, id(digit_font), custom_content.c_str());
+        return;
+      }
+      auto content = id(display_content);
+      if (content == 0) {
+          auto time = id(sntp_time).now();
+          it.printf(4, 0, id(digit_font), "%02d", time.hour);
+          if (time.second % 2 == 0) {
+             it.printf(16, 0, id(digit_font), ":");
+          }
+          it.printf(19, 0, id(digit_font), "%02d", time.minute);
+      } else if (content == 1) {
+
+        auto count = id(github_stars).state;
+        if (count == "") {
+          ESP_LOGD("Display", "github stars is nil");
+          it.print(0, 1, id(digit_font_6), "Load...");
+          return;
+        }
+        it.printf(0, 0, id(digit_font), "%s", count.c_str());
+      } else if (content == 2) {
+      }
+
+text_sensor:
+  - platform: template
+    id: github_stars
+    name: "github stars count"
+    on_raw_value:
+      then:
+        - lambda: |-
+            auto count = x;
+            if (count == "") {
+              ESP_LOGD("text sensor", "github stars is nil");
+              return;
+            }
+            if (count == id(github_stars).state) {
+              ESP_LOGD("text sensor", "github stars not changed");
+              return;
+            }
+            ESP_LOGI("text sensor", "display_custom_content set github stars is %s", count.c_str());
+            id(display_custom_content) = count;
+        - if:
+            condition:
+              lambda: !lambda return id(display_custom_content) != "";
+            then:
+              - script.execute: display_show_custom_content
+
+web_server:
+  port: 80
+
+button:
+  - platform: restart
+    id: restart_button
+    name: "reboot button"
+  - platform: shutdown
+    id: shutdown_button
+    name: "shutdown button"
+
+esp32_touch:
+  setup_mode: true
+
+script:
+  - id: loop_display_content
+    then:
+      - lambda: |-
+          auto content = id(display_content);
+          content++;
+          if (content > 2) {
+              content = 0;
+          }
+          id(display_content) = content;
+          ESP_LOGD("main", "display content: %d", content);
+      - component.update: matrix_display
+  - id: loop_display_brightness
+    then:
+      - lambda: |-
+          auto brightness = id(display_brightness);
+          brightness++;
+          if (brightness > 15) {
+              brightness = 0;
+          }
+          id(display_brightness) = brightness;
+          id(matrix_display).intensity(brightness);
+          ESP_LOGD("main", "display brightness: %d", brightness);
+  - id: display_show_custom_content
+    then:
+      - component.update: matrix_display
+      - delay: 10s
+      - globals.set:
+          id: display_custom_content
+          value: '""'
+      - component.update: matrix_display
+  - id: github_get
+    then:
+      - http_request.get:
+          url: https://api.github.com/repos/ThaddeusJiang/learn-hardware
+          headers:
+            Accept: application/vnd.github.preview
+          verify_ssl: false
+          on_response:
+            then:
+              - lambda: |-
+                  json::parse_json(id(http_request_data).get_string(), [](JsonObject root) {
+                      ESP_LOGD("http request", "github stars: %s", root["stargazers_count"]);
+                      id(github_stars).publish_state(root["stargazers_count"]);
+                  });
+
+binary_sensor:
+  - platform: esp32_touch
+    name: "ESP32 Touch Pad GPIO27"
+    pin: GPIO27
+    threshold: 1000
+    on_press:
+      then:
+        - script.execute: loop_display_content
+  - platform: esp32_touch
+    name: "ESP32 Touch Pad GPIO13"
+    pin: GPIO13
+    threshold: 1000
+    on_press:
+      then:
+        - script.execute: loop_display_brightness
+    on_double_click:
+      then:
+        - lambda: id(restart_button).press();
+
+http_request:
+  id: http_request_data
+  useragent: esphome/device
+  timeout: 10s
